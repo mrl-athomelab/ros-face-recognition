@@ -4,6 +4,7 @@ import cv2
 import random
 import time
 import pickle
+import rospy
 
 _base_dir = os.path.dirname(__file__)
 _data_dir = os.path.join(_base_dir, "data")
