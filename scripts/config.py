@@ -30,8 +30,8 @@ skip_frames = 2
 topic_name = "ros_face_recognition"
 
 # ROS topic that contains video stream.
-image_topic = "/camera/rgb/image_raw"
-depth_topic = "/camera/depth/image_raw"
+image_topic = "/head_xtion/rgb/image_raw"
+depth_topic = "/head_xtion/depth/image_raw"
 
 # Tracker quality of each face.
 face_tracker_quality = 8
