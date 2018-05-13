@@ -16,6 +16,8 @@ from cv_bridge import CvBridge, CvBridgeError
 from ros_face_recognition.msg import Box
 from ros_face_recognition.srv import Face, Name, NameResponse, FaceResponse, Detect, DetectResponse
 
+from sara_msgs.msg import Faces, FaceMsg, BoundingBox2D
+
 _topic = config.topic_name
 _base_dir = os.path.dirname(__file__)
 _face_dir = os.path.join(_base_dir, "faces")
@@ -42,8 +44,19 @@ def name_controller(req):
 
 class ImageReader:
     def __init__(self):
+        self.time = rospy.get_rostime()
+        self.flagClassificationInProgress = False
+
         self.bridge = CvBridge()
         self.image_sub = rospy.Subscriber(config.image_topic, Image, self.process)
+        self.depth_sub = rospy.Subscriber(config.depth_topic, Image, self.process_depth)
+
+        self.faces_pub = rospy.Publisher('/SaraFaceDetector/face', Faces, queue_size=1)
+        self.rgb_pub = rospy.Publisher('/SaraFaceDetector/rgb', Image, queue_size=1)
+        self.depth_pub = rospy.Publisher('/SaraFaceDetector/depth', Image, queue_size=1)
+        self.msg = Faces()
+        self.rgb = Image()
+        self.depth =  Image()
 
         self.faces = []
 
@@ -54,86 +67,136 @@ class ImageReader:
 
         self.image_shape = (0, 0)
 
-    def process(self, data):
+    def process_depth(self, inputData):
+        self.depth = inputData
+
+    def process(self, inputData):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-            image = cv2.resize(cv_image, (0, 0), fx=config.scale, fy=config.scale)
+            self.time = rospy.get_rostime()
+            if self.flagClassificationInProgress is not True:
+                self.flagClassificationInProgress = True
+                self.rgb = inputData
+                data = inputData
+                cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+                image = cv2.resize(cv_image, (0, 0), fx=config.scale, fy=config.scale)
 
-            self.image_shape = image.shape[:2]
+                self.image_shape = image.shape[:2]
 
-            original = image.copy()
+                original = image.copy()
 
-            if self.frame_limit % config.skip_frames == 0:
-                self.frame_limit = 0
-                # Detecting face positions
-                self.face_positions = face_api.detect_faces(image, min_score=config.detection_score,
-                                                            max_idx=config.detection_idx)
-            self.frame_limit += 1
+                if self.frame_limit % config.skip_frames == 0:
+                    self.frame_limit = 0
+                    # Detecting face positions
+                    self.face_positions = face_api.detect_faces(image, min_score=config.detection_score,
+                                                                max_idx=config.detection_idx)
 
-            if len(self.face_positions) > len(self.detected_faces):
-                # Make the list empty
-                self.detected_faces = []
+                self.frame_limit += 1
 
-                # Compute the 128D vector that describes the face in img identified by
-                # shape.
-                encodings = face_api.face_descriptor(image, self.face_positions)
+                if len(self.face_positions) > len(self.detected_faces):
+                    # Make the list empty
+                    self.detected_faces = []
 
-                for face_position, encoding in zip(self.face_positions, encodings):
-                    # Create object from face_position.
-                    face = face_api.Face(face_position[0], tracker_timeout=config.tracker_timeout)
+                    # Compute the 128D vector that describes the face in img identified by
+                    # shape.
+                    encodings = face_api.face_descriptor(image, self.face_positions)
 
-                    predicted_id = classifier.predict(encoding)
-                    if predicted_id != 0:
-                        face.details = face_map[predicted_id]
+                    for face_position, encoding in zip(self.face_positions, encodings):
+                        # Create object from face_position.
+                        face = face_api.Face(face_position[0], tracker_timeout=config.tracker_timeout)
 
-                        # try to find gender.
-                        if face.details["gender"] == "unknown":
+                        predicted_id = classifier.predict(encoding)
+                        if predicted_id != 0:
+                            face.details = face_map[predicted_id]
+
+                            # try to find gender.
+                            if face.details["gender"] == "unknown":
+                                face.details["gender"] = face_api.predict_gender(encoding)
+
+                        else:
                             face.details["gender"] = face_api.predict_gender(encoding)
+                            face_map[face.details["id"]] = face.details
 
-                    else:
-                        face.details["gender"] = face_api.predict_gender(encoding)
-                        face_map[face.details["id"]] = face.details
+                        if face_map[face.details["id"]]["size"] < config.classification_size:
+                            face_map[face.details["id"]]["size"] += 1
 
-                    if face_map[face.details["id"]]["size"] < config.classification_size:
-                        face_map[face.details["id"]]["size"] += 1
+                            classifier.add_pair(encoding, face.details["id"])
 
-                        classifier.add_pair(encoding, face.details["id"])
+                            face_path = os.path.join(_face_dir, face.details["id"])
+                            if not os.path.exists(face_path):
+                                os.mkdir(face_path)
+                            with open(os.path.join(face_path, "{}.dump".format(int(time.time()))), 'wb') as fp:
+                                pickle.dump(encoding, fp)
 
-                        face_path = os.path.join(_face_dir, face.details["id"])
-                        if not os.path.exists(face_path):
-                            os.mkdir(face_path)
-                        with open(os.path.join(face_path, "{}.dump".format(int(time.time()))), 'wb') as fp:
-                            pickle.dump(encoding, fp)
+                        # Start correlation tracker for face.
+                        face.tracker.start_track(image, face_position[0])
 
-                    # Start correlation tracker for face.
-                    face.tracker.start_track(image, face_position[0])
+                        # Face detection score, The score is bigger for more confident
+                        # detections.
+                        rospy.loginfo(
+                            "Face {}->{:5} , [{}] [score : {:.2f}], [xmin: {} xmax: {} ymin: {} ymax: {}]".format(face.details["id"],
+                                                                           face.details["name"],
+                                                                           face.details["gender"],
+                                                                           face_position[1],
+                                                                           face.rect.left()/config.scale,
+                                                                           face.rect.width()/config.scale + face.rect.left()/config.scale,
+                                                                           face.rect.top()/config.scale,
+                                                                           face.rect.height()/config.scale + face.rect.top()/config.scale))
 
-                    # Face detection score, The score is bigger for more confident
-                    # detections.
-                    rospy.loginfo(
-                        "Face {}->{:5} , [{}] [score : {:.2f}]".format(face.details["id"],
-                                                                       face.details["name"],
-                                                                       face.details["gender"],
-                                                                       face_position[1]))
+                        face.details["score"] = face_position[1]
+                        rospy.loginfo("SCORE {}".format(face.details["score"]))
+                        self.detected_faces.append(face)
+                else:
+                    cpt = 0
+                    for index, face in enumerate(self.detected_faces):
+                        # Update tracker , if quality is low ,
+                        # face will be removed from list.
+                        if not face.update_tracker(image):
+                            self.detected_faces.pop(index)
 
-                    self.detected_faces.append(face)
-            else:
-                for index, face in enumerate(self.detected_faces):
-                    # Update tracker , if quality is low ,
-                    # face will be removed from list.
-                    if not face.update_tracker(image):
-                        self.detected_faces.pop(index)
+                        face.details = face_map[str(face.details["id"])]
 
-                    face.details = face_map[str(face.details["id"])]
+                        face.draw_face(original)
+                        cpt = cpt + 1
 
-                    face.draw_face(original)
+                    if cpt > 0:
+                        for index, face in enumerate(self.detected_faces):
+                            msgFace = FaceMsg()
+                            msgBB = BoundingBox2D()
 
-            if config.show_window:
-                cv2.imshow("image", original)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    cv2.destroyAllWindows()
-                    rospy.signal_shutdown("q key pressed")
+                            msgBB.xmin = face.rect.left()/config.scale
+                            msgBB.xmax = face.rect.width()/config.scale + face.rect.left()/config.scale
+                            msgBB.ymin = face.rect.top()/config.scale
+                            msgBB.ymax = face.rect.height()/config.scale + face.rect.top()/config.scale
+                            msgBB.Class = "face"
+
+                            msgFace.gender = face.details["gender"]
+                            msgFace.id = face.details["id"]
+                            msgFace.name = face.details["name"]
+                            if face.details["score"] > 1:
+                                msgFace.genderProbability = 100.0
+                            elif face.details["score"] < 1:
+                                msgFace.genderProbability = 100.0
+                            elif face.details["score"] > 0:
+                                msgFace.genderProbability = face.details["score"]*100.0
+                            else:
+                                msgFace.genderProbability = -100.0*face.details["score"]
+                            msgFace.boundingBoxe = msgBB
+
+                            self.msg.faces.append(msgFace)
+                        self.msg.header.stamp = self.time
+                        self.faces_pub.publish(self.msg)
+                        self.rgb_pub.publish(self.rgb)
+                        self.depth_pub.publish(self.depth)
+
+                        self.msg.faces = []
+                if config.show_window:
+                    cv2.imshow("image", original)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        cv2.destroyAllWindows()
+                        rospy.signal_shutdown("q key pressed")
+
+            self.flagClassificationInProgress = False
 
         except CvBridgeError as e:
             rospy.logerr(e)
@@ -200,7 +263,7 @@ class ImageReader:
             box.label = face.details["id"]
             box.name = face.details["name"]
             boxes.append(box)
-
+            rospy.loginfo("{} faces loaded.".format(box.name))
         response = DetectResponse(boxes)
         return response
 
@@ -213,8 +276,11 @@ def main():
         tracker_quality_param = rospy.search_param("tracker_quality")
         scale_param = rospy.search_param("scale")
         image_topic = rospy.search_param("image_topic")
+        depth_topic = rospy.search_param("depth_topic")
         if image_topic is not None:
             config.image_topic = rospy.get_param(image_topic, config.image_topic)
+        if depth_topic is not None:
+            config.depth_topic = rospy.get_param(depth_topic, config.depth_topic)
         if show_window_param is not None:
             config.show_window = rospy.get_param(show_window_param, config.show_window)
         if tracker_quality_param is not None:

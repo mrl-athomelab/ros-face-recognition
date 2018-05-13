@@ -41,6 +41,7 @@ class ImageReader:
                     face.details["gender"] = f.gender
 
                     face.draw_face(image)
+
             except rospy.ServiceException, e:
                 print "Service call failed: %s" % e
 
