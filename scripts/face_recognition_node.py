@@ -172,10 +172,7 @@ class ImageReader:
                             msgFace.gender = face.details["gender"]
                             msgFace.id = face.details["id"]
                             msgFace.name = face.details["name"]
-                            if face.details["score"] >= 0:
-                                msgFace.genderProbability = face.details["score"] / 2.7
-                            elif face.details["score"] < 0:
-                                msgFace.genderProbability = -face.details["score"] / 2.7
+                            msgFace.genderProbability = abs(face.details["score"] / 2.7)
 
                             msgFace.boundingBoxe = msgBB
 
