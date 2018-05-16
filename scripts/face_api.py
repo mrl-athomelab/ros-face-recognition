@@ -4,6 +4,7 @@ import cv2
 import random
 import time
 import pickle
+import rospy
 
 _base_dir = os.path.dirname(__file__)
 _data_dir = os.path.join(_base_dir, "data")
@@ -61,7 +62,7 @@ class Face:
         self.rect = rect
         self.tracker = Tracker(timeout=tracker_timeout)
         tmp_id = str(random.randrange(10000, 99999))
-        self.details = {"id": tmp_id, "gender": "unknown", "name": tmp_id, "size": 0}
+        self.details = {"id": tmp_id, "gender": "unknown", "name": tmp_id, "size": 0, "score": 0}
 
     def update_tracker(self, image, min_quality=5):
         if self.tracker.update_tracker(image, min_quality):

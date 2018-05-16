@@ -1,4 +1,9 @@
 
+##EXECUTER LE SCRIPT INSTALL.SH
+
+
+
+
 # MRL @Home face recognition
 
 Face recognition using dlib and optimized kNN classification in ROS.
